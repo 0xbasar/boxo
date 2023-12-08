@@ -22,6 +22,11 @@ The following emojis are used to highlight certain changes:
 
 ### Security
 
+### Fixed
+
+* `boxo/gateway`
+  * when making a trustless CAR request with the "entity-bytes" parameter, using a negative index greater than the underlying entity length could trigger reading more data than intended
+  
 ## [v0.16.0]
 
 ### Changed
