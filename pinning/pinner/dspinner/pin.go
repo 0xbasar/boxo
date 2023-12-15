@@ -174,20 +174,20 @@ func (p *pinner) SetAutosync(auto bool) bool {
 }
 
 // Pin the given node, optionally recursive
-func (p *pinner) Pin(ctx context.Context, node ipld.Node, recurse bool) error {
+func (p *pinner) Pin(ctx context.Context, node ipld.Node, recurse bool, label string) error {
 	err := p.dserv.Add(ctx, node)
 	if err != nil {
 		return err
 	}
 
 	if recurse {
-		return p.doPinRecursive(ctx, node.Cid(), true)
+		return p.doPinRecursive(ctx, node.Cid(), true, label)
 	} else {
-		return p.doPinDirect(ctx, node.Cid())
+		return p.doPinDirect(ctx, node.Cid(), label)
 	}
 }
 
-func (p *pinner) doPinRecursive(ctx context.Context, c cid.Cid, fetch bool) error {
+func (p *pinner) doPinRecursive(ctx context.Context, c cid.Cid, fetch bool, label string) error {
 	cidKey := c.KeyString()
 
 	p.lock.Lock()
@@ -243,14 +243,14 @@ func (p *pinner) doPinRecursive(ctx context.Context, c cid.Cid, fetch bool) erro
 		}
 	}
 
-	_, err = p.addPin(ctx, c, ipfspinner.Recursive, "")
+	_, err = p.addPin(ctx, c, ipfspinner.Recursive, label)
 	if err != nil {
 		return err
 	}
 	return p.flushPins(ctx, false)
 }
 
-func (p *pinner) doPinDirect(ctx context.Context, c cid.Cid) error {
+func (p *pinner) doPinDirect(ctx context.Context, c cid.Cid, label string) error {
 	cidKey := c.KeyString()
 
 	p.lock.Lock()
@@ -264,7 +264,7 @@ func (p *pinner) doPinDirect(ctx context.Context, c cid.Cid) error {
 		return fmt.Errorf("%s already pinned recursively", c.String())
 	}
 
-	_, err = p.addPin(ctx, c, ipfspinner.Direct, "")
+	_, err = p.addPin(ctx, c, ipfspinner.Direct, label)
 	if err != nil {
 		return err
 	}
@@ -665,17 +665,17 @@ func (p *pinner) loadPin(ctx context.Context, pid string) (*pin, error) {
 }
 
 // DirectKeys returns a slice containing the directly pinned keys
-func (p *pinner) DirectKeys(ctx context.Context) <-chan ipfspinner.StreamedCid {
+func (p *pinner) DirectKeys(ctx context.Context) <-chan ipfspinner.StreamedPin {
 	return p.streamIndex(ctx, p.cidDIndex)
 }
 
 // RecursiveKeys returns a slice containing the recursively pinned keys
-func (p *pinner) RecursiveKeys(ctx context.Context) <-chan ipfspinner.StreamedCid {
+func (p *pinner) RecursiveKeys(ctx context.Context) <-chan ipfspinner.StreamedPin {
 	return p.streamIndex(ctx, p.cidRIndex)
 }
 
-func (p *pinner) streamIndex(ctx context.Context, index dsindex.Indexer) <-chan ipfspinner.StreamedCid {
-	out := make(chan ipfspinner.StreamedCid)
+func (p *pinner) streamIndex(ctx context.Context, index dsindex.Indexer) <-chan ipfspinner.StreamedPin {
+	out := make(chan ipfspinner.StreamedPin)
 
 	go func() {
 		defer close(out)
@@ -688,21 +688,32 @@ func (p *pinner) streamIndex(ctx context.Context, index dsindex.Indexer) <-chan 
 		err := index.ForEach(ctx, "", func(key, value string) bool {
 			c, err := cid.Cast([]byte(key))
 			if err != nil {
-				out <- ipfspinner.StreamedCid{Err: err}
+				out <- ipfspinner.StreamedPin{Err: err}
 				return false
 			}
+
+			pp, err := p.loadPin(ctx, value)
+			if err != nil {
+				out <- ipfspinner.StreamedPin{Err: err}
+				return false
+			}
+
 			if !cidSet.Has(c) {
 				select {
 				case <-ctx.Done():
 					return false
-				case out <- ipfspinner.StreamedCid{C: c}:
+				case out <- ipfspinner.StreamedPin{Pin: ipfspinner.Pinned{
+					Key:   pp.Cid,
+					Mode:  pp.Mode,
+					Label: pp.Name,
+				}}:
 				}
 				cidSet.Add(c)
 			}
 			return true
 		})
 		if err != nil {
-			out <- ipfspinner.StreamedCid{Err: err}
+			out <- ipfspinner.StreamedPin{Err: err}
 		}
 	}()
 
@@ -711,8 +722,8 @@ func (p *pinner) streamIndex(ctx context.Context, index dsindex.Indexer) <-chan 
 
 // InternalPins returns all cids kept pinned for the internal state of the
 // pinner
-func (p *pinner) InternalPins(ctx context.Context) <-chan ipfspinner.StreamedCid {
-	c := make(chan ipfspinner.StreamedCid)
+func (p *pinner) InternalPins(ctx context.Context) <-chan ipfspinner.StreamedPin {
+	c := make(chan ipfspinner.StreamedPin)
 	close(c)
 	return c
 }
@@ -755,6 +766,8 @@ func (p *pinner) Update(ctx context.Context, from, to cid.Cid, unpin bool) error
 	if err != nil {
 		return err
 	}
+
+	// TODO: get old pin label
 
 	_, err = p.addPin(ctx, to, ipfspinner.Recursive, "")
 	if err != nil {
@@ -809,13 +822,13 @@ func (p *pinner) Flush(ctx context.Context) error {
 
 // PinWithMode allows the user to have fine grained control over pin
 // counts
-func (p *pinner) PinWithMode(ctx context.Context, c cid.Cid, mode ipfspinner.Mode) error {
+func (p *pinner) PinWithMode(ctx context.Context, c cid.Cid, mode ipfspinner.Mode, label string) error {
 	// TODO: remove his to support multiple pins per CID
 	switch mode {
 	case ipfspinner.Recursive:
-		return p.doPinRecursive(ctx, c, false)
+		return p.doPinRecursive(ctx, c, false, label)
 	case ipfspinner.Direct:
-		return p.doPinDirect(ctx, c)
+		return p.doPinDirect(ctx, c, label)
 	default:
 		return errors.New("unrecognized pin mode")
 	}
